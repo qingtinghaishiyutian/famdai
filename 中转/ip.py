@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 URL = "https://zip.cm.edu.kg/all.txt"
-OUT_FILE = "cm亚太ip.txt"
+BASE_DIR = Path(__file__).parent  # 脚本所在目录（应该是 中转/）
+OUT_FILE = BASE_DIR / "cm亚太ip.txt"
 
 # 要支持的国家标签（小写）
 COUNTRIES = ["sg", "hk", "jp", "tw", "kr"]
