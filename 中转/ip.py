@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ip.py - fetch https://zip.cm.edu.kg/all.txt, keep lines with #SG/#HK/#JP/#TW/#KR (case-insensitive),
-dedupe preserving order, test IP reachability concurrently (ping then TCP 80/443),
-save up to per-country limits to 中转ip.txt
+中转/ip.py
+从 https://zip.cm.edu.kg/all.txt 拉取数据，筛选包含 #SG/#HK/#JP/#TW/#KR 的行并去重，
+并发检测 IP 可达性（先 ping，ping 失败则尝试 TCP 80/443），按每国上限保存结果。
+输出文件：与脚本同目录下的 中转ip.txt（脚本不会自动创建目录）。
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
@@ -11,15 +12,18 @@ import sys
 import subprocess
 import platform
 import socket
+from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
+BASE_DIR = Path(__file__).parent  # 脚本所在目录（应该是 中转/）
+OUT_FILE = BASE_DIR / "中转ip.txt"
+
 URL = "https://zip.cm.edu.kg/all.txt"
-OUT_FILE = "中转ip.txt"
 
 # 要支持的国家标签（小写）
 COUNTRIES = ["sg", "hk", "jp", "tw", "kr"]
 
-# 每个国家最多保存多少条（根据你的要求）
+# 每个国家最多保存多少条（你指定的）
 MAX_PER_COUNTRY: Dict[str, int] = {"sg": 100, "hk": 50, "jp": 50, "tw": 50, "kr": 50}
 
 # 正则匹配标签与 IPv4（支持可选的 /n 后缀）
@@ -30,7 +34,7 @@ RE_IPV4 = re.compile(r'(\d{1,3}(?:\.\d{1,3}){3})(?:/\d{1,2})?')
 PING_TIMEOUT = 2.0
 TCP_TIMEOUT = 1.0
 
-# 并发线程数（视 runner 资源与目标数量可调）
+# 并发线程数（可调）
 MAX_WORKERS = 8
 
 
@@ -60,14 +64,13 @@ def fetch_text() -> str:
                 data = resp.read()
                 content_type = None
                 try:
-                    content_type = resp.headers.get("Content-Type")
+                    content_type = resp.headers.get('Content-Type')
                 except Exception:
                     pass
         except Exception as e_urllib:
             print("requests and urllib both failed:", e_requests, e_urllib)
             raise
 
-        # 尝试从 Content-Type 中解析 charset，或使用常见编码
         charset = None
         if content_type:
             m = re.search(r'charset=([^\s;]+)', content_type, flags=re.I)
@@ -85,7 +88,7 @@ def fetch_text() -> str:
 
 
 def extract_ipv4(line: str) -> Optional[str]:
-    """从行中提取 IPv4 地址（若有 CIDR 后缀则忽略后缀），并简单验证每段在 0-255。"""
+    """从行中提取 IPv4（忽略可能的 /n 后缀），并简单校验每段在 0-255。"""
     m = RE_IPV4.search(line)
     if not m:
         return None
@@ -101,17 +104,12 @@ def extract_ipv4(line: str) -> Optional[str]:
 
 
 def ping_host(ip: str, timeout: float = PING_TIMEOUT) -> bool:
-    """
-    用系统 ping 测试主机是否可达。
-    使用 -c 1 发一包并用 subprocess.timeout 控制等待时间（跨平台兼容）。
-    """
+    """使用系统 ping（-c 1 / -n 1），并用 subprocess.timeout 控制等待时间。"""
     system = platform.system().lower()
     try:
         if system == "windows":
-            # Windows 用 -n 1，-w 毫秒超时（subprocess.timeout 也控制）
-            cmd =["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+            cmd = ["ping", "-n", "1", "-w", str(int(timeout *1000)), ip]
         else:
-            # Linux/macOS 等用 -c 1 发一包
             cmd = ["ping", "-c", "1", ip]
         res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 0.5)
         return res.returncode == 0
@@ -120,7 +118,7 @@ def ping_host(ip: str, timeout: float = PING_TIMEOUT) -> bool:
 
 
 def tcp_connect(ip: str, ports=(80, 443), timeout: float = TCP_TIMEOUT) -> bool:
-    """尝试通过 TCP 连接指定端口列表，只要有一个端口能连通即认为可达。"""
+    """尝试连接端口列表，任一成功即认为可达。"""
     for port in ports:
         try:
             with socket.create_connection((ip, port), timeout=timeout):
@@ -138,7 +136,7 @@ def is_reachable(ip: str) -> bool:
 
 
 def primary_tag_of_line(line: str) -> Optional[str]:
-    """返回该行的主标签（sg/hk/jp/tw/kr），按 COUNTRIES 顺序优先匹配。"""
+    """按 COUNTRIES 顺序返回该行的主标签（若包含多个标签，以顺序优先）。"""
     low = line.lower()
     for c in COUNTRIES:
         if f"#{c}" in low:
@@ -148,8 +146,7 @@ def primary_tag_of_line(line: str) -> Optional[str]:
 
 def collect_candidates(text: str) -> List[Tuple[int, str, str, str]]:
     """
-    扫描文本并收集候选项（按原始顺序），返回列表：
-    (index, line, tag, ip)
+    扫描文本并收集候选项（按原始顺序），返回列表 (index, line, tag, ip)。
     去重基于完整行字符串（保留首次出现）。
     """
     seen = set()
@@ -176,12 +173,13 @@ def collect_candidates(text: str) -> List[Tuple[int, str, str, str]]:
 def run_concurrent_tests(candidates: List[Tuple[int, str, str, str]]) -> Tuple[Dict[str, List[Tuple[int, str]]], int]:
     """
     并发检测候选 reachability。
-    返回 (saved, tested):
-      saved: country -> list of (index, line) 达通的（按 index 未排序）
-      tested: 实际完成检测的候选数
+    返回 saved (country -> list[(index,line)]) 与 tested 数量。
     """
     saved: Dict[str, List[Tuple[int, str]]] = {c: [] for c in COUNTRIES}
     tested = 0
+    if not candidates:
+        return saved, 0
+
     futures = {}
     workers = min(MAX_WORKERS, max(1, len(candidates)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -190,7 +188,6 @@ def run_concurrent_tests(candidates: List[Tuple[int, str, str, str]]) -> Tuple[D
             fut = ex.submit(is_reachable, ip)
             futures[fut] = cand
 
-        # as_completed yields futures as they finish
         for fut in as_completed(list(futures.keys())):
             cand = futures.get(fut)
             if cand is None:
@@ -201,11 +198,9 @@ def run_concurrent_tests(candidates: List[Tuple[int, str, str, str]]) -> Tuple[D
                 ok = fut.result()
             except Exception:
                 ok = False
-            if ok:
-                # 只有当该国家尚未满额时才保存
-                if len(saved[tag]) < MAX_PER_COUNTRY.get(tag, 0):
-                    saved[tag].append((idx, line))
-            # 检查是否所有国家都已满额，若是则尝试取消剩余 futures 并退出循环
+            if ok and len(saved[tag]) < MAX_PER_COUNTRY.get(tag, 0):
+                saved[tag].append((idx, line))
+            # 若所有国家都已满额，取消剩余任务并退出
             if all(len(saved[c]) >= MAX_PER_COUNTRY.get(c, 0) for c in COUNTRIES):
                 for other_fut in list(futures.keys()):
                     if not other_fut.done():
@@ -221,14 +216,26 @@ def run_concurrent_tests(candidates: List[Tuple[int, str, str, str]]) -> Tuple[D
     return saved, tested
 
 
-def write_output(saved: Dict[str, List[Tuple[int, str]]], out_file: str = OUT_FILE) -> None:
-    """把所有保存的行按国家顺序写入文件，国家间按 COUNTRIES 顺序，国家内部按原始出现顺序。"""
-    lines = []
+def write_output(saved: Dict[str, List[Tuple[int, str]]], out_path: Path = OUT_FILE) -> None:
+    """
+    把保存的行按国家顺序写入文件。
+    注意：按你的要求脚本不会自动创建目录；若目录不存在则报错并退出。
+    """
+    if not out_path.parent.exists():
+        print(f"输出目录 {out_path.parent} 不存在。脚本不会自动创建，请先在仓库中创建该目录并提交（或确保 workflow 创建）。")
+        sys.exit(2)
+
+    lines: List[str] = []
     for c in COUNTRIES:
         lines.extend([ln for (_, ln) in saved.get(c, [])])
-    with open(out_file, "w", encoding="utf-8", newline="\n") as f:
-        for ln in lines:
-            f.write(ln + "\n")
+
+    try:
+        with out_path.open("w",encoding="utf-8", newline="\n") as f:
+            for ln in lines:
+                f.write(ln + "\n")
+    except Exception as e:
+        print(f"写入文件 {out_path} 失败: {e}")
+        raise
 
 
 def main():
@@ -259,3 +266,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
