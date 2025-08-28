@@ -23,7 +23,7 @@ OUT_FILE = BASE_DIR / "cm亚太ip.txt"
 COUNTRIES = ["sg", "hk", "jp", "tw", "kr"]
 
 # 每个国家最多保存多少条（你指定的）
-MAX_PER_COUNTRY: Dict[str, int] = {"sg": 100, "hk": 50, "jp": 50, "tw": 50, "kr": 50}
+MAX_PER_COUNTRY: Dict[str, int] = {"sg": 30, "hk": 20, "jp": 20, "tw": 10, "kr": 10}
 
 # 正则匹配标签与 IPv4（支持可选的 /n 后缀）
 PAT_TAG = re.compile(r'#(?:sg|hk|jp|tw|kr)\b', re.IGNORECASE)
